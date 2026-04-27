@@ -1,0 +1,117 @@
+#!/bin/sh
+
+################################################################################
+#                                                                              #
+#           Project: PDF metadata stripper (sanitize & optimize PDF)           #
+#           --------------------------------------------------------           #
+#                   GitHub: https://burian.work/pdf-metadata                   #
+#                           Code: POSIX shell script                           #
+#                                 License: MIT                                 #
+#                            Released: 2026-Apr-27                             #
+#                            Version: 1.0 (initial)                            #
+#                       E-mail: info@vlastimilburian.cz                        #
+#                     Copyright: (c) 2026 Vlastimil Burian                     #
+#                                                                              #
+################################################################################
+
+set -o nounset
+
+# Check for dependencies and report all programs (and packages) missing
+dependencies()
+{
+    dependency_missing=false
+    while [ "$#" -gt 0 ]
+    do
+        if ! command -v "$1" >/dev/null 2>&1
+        then
+            dependency_missing=true
+            printf 'Error: This script requires the "%s" program, but it is not available on this system!\nOn a Debian or a Ubuntu based system, please install the "%s" package. Other systems may differ in package names.\n' "$1" "$2" >&2
+        fi
+        shift 2
+    done
+    if [ "$dependency_missing" = true ]
+    then
+        exit 1
+    fi
+}
+
+dependencies \
+    qpdf        qpdf \
+    exiftool    libimage-exiftool-perl
+
+# Collect files and count them safely
+# We use 'set --' to fill the argument list ($1, $2...) with the glob results
+# If the glob did not match anything, the first element
+# will be a literal string containing: '*.[pP][dD][fF]'
+# If no arguments provided, we look for PDF files in the current directory
+if [ "$#" -eq 0 ]
+then
+    set -- *.[pP][dD][fF]
+    if [ ! -f "$1" ]
+    then
+        printf '%s\n' 'Error: No PDF files provided as arguments and none found in this directory.' >&2
+        exit 1
+    fi
+fi
+
+total_files=$#
+current_count=0
+error_counter=0
+
+printf '\nStarting PDF sanitization process for %d files...\n' "$total_files"
+
+# Loop over positional parameters `$@` which contain either arguments or glob results
+for file in "$@"
+do
+
+    # Process only regular files, skip other types of files
+    if [ ! -f "$file" ]
+    then
+        printf '  [!] Skipping: %s (Not a regular file or not found)\n' "$file" >&2
+        error_counter=$((error_counter + 1))
+        continue
+    fi
+
+    current_count=$((current_count + 1))
+
+    # 2. Print status: file counter, and file name
+    printf '\n[%d/%d] Processing: %s\n' "$current_count" "$total_files" "$file"
+
+    # 3. Save original file timestamp
+    original_timestamp=$(date -r "$file" +%Y%m%d%H%M.%S 2>/dev/null)
+
+    # 4. Wipe metadata tags (exiftool)
+    if ! exiftool -all:all= -overwrite_original -preserve -quiet -quiet -- "$file"
+    then
+        printf  '  [!] exiftool error on %s\n' "$file" >&2
+        error_counter=$((error_counter + 1))
+        continue
+    fi
+    printf '    - Metadata tags wiped.\n'
+
+    # 5. Rebuild/Linearize = prevent recovery from incremental updates (qpdf)
+    if ! qpdf --replace-input --linearize --remove-metadata --remove-info -- "$file"
+    then
+        printf '  [!] qpdf error on %s\n' "$file" >&2
+        error_counter=$((error_counter + 1))
+        continue
+    fi
+    printf '    - History purged and linearized.\n'
+
+    # 6. Restore original file timestamp
+    if [ -n "$original_timestamp" ]
+    then
+        touch -t "$original_timestamp" "$file"
+        printf '    - Original timestamp restored.\n'
+    fi
+
+done
+
+# Final summary
+if [ "$error_counter" -eq 0 ]
+then
+    printf '\n%s\n\n' "Success! All PDFs have been sanitized and linearized."
+else
+    printf '\n%s\n\n' "Process complete, but $error_counter errors occurred. Check output above." >&2
+    exit 1
+fi
